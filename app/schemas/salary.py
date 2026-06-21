@@ -106,12 +106,17 @@ class SalaryItemResponse(BaseModel):
     bank_name: Optional[str]
     phone: Optional[str]
     status: ItemStatusEnum
+    status_name: Optional[str] = None
+    verify_status: Optional[int] = None
     verify_errors: Optional[str]
     fail_reason: Optional[str]
+    last_fail_reason: Optional[str]
     refund_reason: Optional[str]
     bank_trade_no: Optional[str]
+    last_bank_trade_no: Optional[str]
     bank_success_time: Optional[datetime]
     retry_count: int
+    last_retry_time: Optional[datetime]
     created_at: datetime
     updated_at: datetime
 
@@ -123,6 +128,7 @@ class SalaryBatchInfoResponse(BaseModel):
     id: int
     batch_no: str
     project_code: str
+    project_name: Optional[str] = None
     salary_month: str
     team_name: Optional[str]
     total_count: int
@@ -137,9 +143,15 @@ class SalaryBatchInfoResponse(BaseModel):
     refund_count: int
     refund_amount: float
     status: BatchStatusEnum
+    status_name: Optional[str] = None
     submit_by: Optional[str]
     submit_at: Optional[datetime]
     verify_at: Optional[datetime]
+    review_by: Optional[str]
+    review_at: Optional[datetime]
+    review_result: Optional[str]
+    review_remark: Optional[str]
+    approve_by: Optional[str]
     approve_at: Optional[datetime]
     bank_submit_at: Optional[datetime]
     bank_feedback_at: Optional[datetime]
@@ -205,3 +217,73 @@ class WorkerStatusQueryParams(BaseModel):
     batch_no: Optional[str] = None
     page: int = 1
     page_size: int = 50
+
+
+class ReviewActionEnum(str, Enum):
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+
+
+class BatchReviewRequest(BaseModel):
+    batch_no: str = Field(..., max_length=64, description="批次号")
+    action: ReviewActionEnum = Field(..., description="审核动作: APPROVED通过 / REJECTED驳回")
+    review_by: Optional[str] = Field(None, max_length=64, description="审核人")
+    review_remark: Optional[str] = Field(None, max_length=1000, description="审核备注/驳回原因")
+
+
+class BatchReviewResponse(BaseModel):
+    success: bool = True
+    code: int = 200
+    message: str
+    batch_no: str
+    old_status: str
+    new_status: str
+    review_by: Optional[str]
+    review_at: Optional[datetime]
+    review_result: Optional[str]
+    review_remark: Optional[str]
+
+
+class PendingReviewListResponse(BaseModel):
+    success: bool = True
+    code: int = 200
+    message: str = "查询成功"
+    total: int = 0
+    data: List[SalaryBatchInfoResponse] = []
+
+
+class ProjectMonthlySummaryItem(BaseModel):
+    project_code: str
+    project_name: Optional[str] = None
+    salary_month: str
+    total_batches: int = 0
+    total_workers: int = 0
+    total_payable_amount: float = 0.0
+    total_actual_amount: float = 0.0
+    pending_review_count: int = 0
+    pending_review_amount: float = 0.0
+    approved_count: int = 0
+    approved_amount: float = 0.0
+    bank_processing_count: int = 0
+    bank_processing_amount: float = 0.0
+    success_count: int = 0
+    success_amount: float = 0.0
+    failed_count: int = 0
+    failed_amount: float = 0.0
+    refunded_count: int = 0
+    refunded_amount: float = 0.0
+    retry_count: int = 0
+    retry_amount: float = 0.0
+    verify_failed_count: int = 0
+    verify_failed_amount: float = 0.0
+    rejected_count: int = 0
+    rejected_amount: float = 0.0
+
+
+class ProjectMonthlySummaryResponse(BaseModel):
+    success: bool = True
+    code: int = 200
+    message: str = "查询成功"
+    total: int = 0
+    data: List[ProjectMonthlySummaryItem] = []
+

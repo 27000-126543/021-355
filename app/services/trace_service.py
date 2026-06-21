@@ -1,12 +1,14 @@
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from sqlalchemy.orm import Session
 from datetime import datetime
 
 from app.models.models import (
-    SalaryTrace, TraceType, SalaryBatch, SalaryItem
+    SalaryTrace, TraceType, SalaryBatch, SalaryItem, Project, Worker
 )
 from app.schemas.trace import (
-    TraceQueryParams, SalaryTraceResponse, TraceTypeInfo
+    TraceQueryParams, SalaryTraceResponse, TraceTypeInfo,
+    WorkerGroupedTimelineResponse, WorkerProjectGroup,
+    WorkerMonthGroup, WorkerBatchTraceItem
 )
 
 
@@ -225,3 +227,173 @@ class TraceService:
         stats.total_verify_fail = failed_batches.count()
 
         return stats
+
+    @staticmethod
+    def get_worker_grouped_timeline(
+        db: Session,
+        id_card: str,
+        project_code: Optional[str] = None,
+        salary_month: Optional[str] = None
+    ) -> WorkerGroupedTimelineResponse:
+        worker = db.query(Worker).filter(Worker.id_card == id_card).first()
+        worker_name = worker.name if worker else None
+        worker_phone = worker.phone if worker else None
+
+        query = db.query(SalaryItem).filter(SalaryItem.id_card == id_card)
+        if project_code:
+            query = query.filter(SalaryItem.project_code == project_code)
+        if salary_month:
+            query = query.filter(SalaryItem.salary_month == salary_month)
+        items = query.order_by(SalaryItem.created_at.desc()).all()
+
+        if not items:
+            return WorkerGroupedTimelineResponse(
+                message=f"未查询到身份证号 {id_card} 的发薪记录",
+                id_card=id_card,
+                worker_name=worker_name,
+                phone=worker_phone,
+                total_records=0,
+                total_projects=0,
+                total_months=0,
+                project_groups=[]
+            )
+
+        batch_ids = [item.batch_id for item in items]
+        all_batch_map = {}
+        for item in items:
+            if item.batch_id not in all_batch_map:
+                all_batch_map[item.batch_id] = []
+
+        all_batch_traces = db.query(SalaryTrace).filter(
+            SalaryTrace.batch_id.in_(batch_ids)
+        ).order_by(SalaryTrace.trace_time.asc()).all()
+
+        per_worker_traces = db.query(SalaryTrace).filter(
+            SalaryTrace.id_card == id_card
+        ).order_by(SalaryTrace.trace_time.asc()).all()
+
+        worker_trace_by_batch: Dict[int, List[SalaryTrace]] = {}
+        for t in all_batch_traces:
+            if t.batch_id not in worker_trace_by_batch:
+                worker_trace_by_batch[t.batch_id] = []
+            worker_trace_by_batch[t.batch_id].append(t)
+
+        for t in per_worker_traces:
+            if t.batch_id and t.batch_id not in worker_trace_by_batch:
+                worker_trace_by_batch[t.batch_id] = []
+            if t.batch_id:
+                worker_trace_by_batch[t.batch_id].append(t)
+
+        for bid in worker_trace_by_batch:
+            seen_ids = set()
+            unique_traces = []
+            for t in worker_trace_by_batch[bid]:
+                if t.id not in seen_ids:
+                    seen_ids.add(t.id)
+                    unique_traces.append(t)
+            worker_trace_by_batch[bid] = unique_traces
+
+        project_map = {p.project_code: p for p in db.query(Project).all()}
+
+        project_groups_dict: Dict[str, WorkerProjectGroup] = {}
+        month_set = set()
+
+        for item in items:
+            proj_code = item.project_code or "UNKNOWN"
+            month = item.salary_month or "UNKNOWN"
+
+            if proj_code not in project_groups_dict:
+                proj = project_map.get(proj_code)
+                project_groups_dict[proj_code] = WorkerProjectGroup(
+                    project_code=proj_code,
+                    project_name=proj.project_name if proj else None,
+                    months=[],
+                    total_count=0,
+                    total_payable=0.0,
+                    total_actual=0.0
+                )
+
+            proj_group = project_groups_dict[proj_code]
+
+            month_obj = None
+            for m in proj_group.months:
+                if m.salary_month == month:
+                    month_obj = m
+                    break
+            if not month_obj:
+                month_obj = WorkerMonthGroup(
+                    salary_month=month,
+                    records=[],
+                    total_count=0,
+                    total_payable=0.0,
+                    total_actual=0.0
+                )
+                proj_group.months.append(month_obj)
+            month_set.add((proj_code, month))
+
+            trace_list = []
+            batch_traces = worker_trace_by_batch.get(item.batch_id, [])
+            for idx, t in enumerate(sorted(batch_traces, key=lambda x: x.trace_time)):
+                resp = SalaryTraceResponse.model_validate(t)
+                resp.trace_type_name = TraceTypeInfo.get_name(t.trace_type)
+                resp.timeline_index = idx + 1
+                trace_list.append(resp)
+
+            status_name_map = {
+                "PENDING": "待处理",
+                "VERIFIED": "校验通过",
+                "VERIFY_FAILED": "校验失败",
+                "APPROVED": "审核通过",
+                "REJECTED": "审核驳回",
+                "BANK_PROCESSING": "银行处理中",
+                "SUCCESS": "代发成功",
+                "FAILED": "代发失败",
+                "REFUNDED": "已退票",
+                "RETRY_SUCCESS": "重试成功",
+                "RETRY_FAILED": "重试失败"
+            }
+
+            record = WorkerBatchTraceItem(
+                batch_no=item.batch_no,
+                salary_month=item.salary_month,
+                project_code=item.project_code,
+                project_name=project_map.get(item.project_code).project_name if project_map.get(item.project_code) else None,
+                team_name=item.team_name,
+                payable_amount=item.payable_amount,
+                actual_amount=item.actual_amount,
+                status=item.status.value,
+                status_name=status_name_map.get(item.status.value, item.status.value),
+                verify_errors=item.verify_errors,
+                fail_reason=item.fail_reason,
+                last_fail_reason=getattr(item, 'last_fail_reason', None),
+                refund_reason=item.refund_reason,
+                bank_trade_no=item.bank_trade_no,
+                last_bank_trade_no=getattr(item, 'last_bank_trade_no', None),
+                retry_count=item.retry_count or 0,
+                created_at=item.created_at,
+                traces=trace_list
+            )
+            month_obj.records.append(record)
+            month_obj.total_count += 1
+            month_obj.total_payable += item.payable_amount or 0
+            month_obj.total_actual += item.actual_amount or 0
+
+            proj_group.total_count += 1
+            proj_group.total_payable += item.payable_amount or 0
+            proj_group.total_actual += item.actual_amount or 0
+
+        project_groups = list(project_groups_dict.values())
+        for pg in project_groups:
+            pg.months.sort(key=lambda m: m.salary_month, reverse=True)
+        project_groups.sort(key=lambda p: p.project_code)
+
+        return WorkerGroupedTimelineResponse(
+            message=f"查询成功，共找到{len(items)}条记录",
+            id_card=id_card,
+            worker_name=worker_name,
+            phone=worker_phone,
+            total_records=len(items),
+            total_projects=len(project_groups),
+            total_months=len(month_set),
+            project_groups=project_groups
+        )

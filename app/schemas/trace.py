@@ -148,3 +148,54 @@ class TraceStatisticsResponse(BaseModel):
     code: int = 200
     message: str = "查询成功"
     statistics: TraceStatistics = TraceStatistics()
+
+
+class WorkerBatchTraceItem(BaseModel):
+    batch_no: str
+    salary_month: str
+    project_code: Optional[str]
+    project_name: Optional[str]
+    team_name: Optional[str]
+    payable_amount: Optional[float]
+    actual_amount: Optional[float]
+    status: Optional[str]
+    status_name: Optional[str]
+    verify_errors: Optional[str]
+    fail_reason: Optional[str]
+    last_fail_reason: Optional[str]
+    refund_reason: Optional[str]
+    bank_trade_no: Optional[str]
+    last_bank_trade_no: Optional[str]
+    retry_count: int
+    created_at: Optional[datetime]
+    traces: List[SalaryTraceResponse] = []
+
+
+class WorkerMonthGroup(BaseModel):
+    salary_month: str
+    records: List[WorkerBatchTraceItem] = []
+    total_count: int = 0
+    total_payable: float = 0.0
+    total_actual: float = 0.0
+
+
+class WorkerProjectGroup(BaseModel):
+    project_code: str
+    project_name: Optional[str]
+    months: List[WorkerMonthGroup] = []
+    total_count: int = 0
+    total_payable: float = 0.0
+    total_actual: float = 0.0
+
+
+class WorkerGroupedTimelineResponse(BaseModel):
+    success: bool = True
+    code: int = 200
+    message: str = "查询成功"
+    id_card: Optional[str]
+    worker_name: Optional[str]
+    phone: Optional[str]
+    total_records: int = 0
+    total_projects: int = 0
+    total_months: int = 0
+    project_groups: List[WorkerProjectGroup] = []

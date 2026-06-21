@@ -36,12 +36,12 @@ class BankService:
                 bank_batch_no=""
             )
 
-        if batch.status not in [BatchStatus.APPROVED, BatchStatus.VERIFIED,
+        if batch.status not in [BatchStatus.APPROVED,
                                  BatchStatus.ALL_FAILED, BatchStatus.PARTIAL_SUCCESS]:
             return BankSubmitResponse(
                 success=False,
                 code=400,
-                message=f"批次状态 {batch.status.value} 不允许提交银行",
+                message=f"批次状态 {batch.status.value} 不允许提交银行，请先完成专户审核",
                 batch_no=request.batch_no,
                 bank_batch_no=""
             )
@@ -49,7 +49,7 @@ class BankService:
         items_to_submit = db.query(SalaryItem).filter(
             SalaryItem.batch_id == batch.id,
             SalaryItem.status.in_([
-                ItemStatus.VERIFIED, ItemStatus.APPROVED,
+                ItemStatus.APPROVED,
                 ItemStatus.FAILED, ItemStatus.RETRY_FAILED, ItemStatus.REFUNDED
             ])
         ).all()
@@ -442,14 +442,48 @@ class BankService:
         retry_amount = sum(item.payable_amount for item in items_to_retry)
         old_status = batch.status.value
 
+        bank_batch_no = BankService._generate_bank_batch_no()
+        retry_at = datetime.now()
+
+        bank_record = BankDisbursement(
+            batch_id=batch.id,
+            batch_no=batch.batch_no,
+            bank_batch_no=bank_batch_no,
+            bank_code=None,
+            bank_name=None,
+            submit_count=retry_count,
+            submit_amount=retry_amount,
+            submit_at=retry_at,
+            status="RETRY_SUBMITTED"
+        )
+        db.add(bank_record)
+        db.flush()
+
         for item in items_to_retry:
+            original_fail_reason = item.fail_reason or item.refund_reason
+            item.last_fail_reason = original_fail_reason or item.last_fail_reason
+            item.last_bank_trade_no = item.bank_trade_no or item.last_bank_trade_no
             item.retry_count += 1
-            item.last_retry_time = datetime.now()
+            item.last_retry_time = retry_at
             item.status = ItemStatus.BANK_PROCESSING
             item.fail_reason = None
             item.refund_reason = None
+            item.bank_trade_no = None
+
+            detail = BankDisbursementDetail(
+                disbursement_id=bank_record.id,
+                bank_batch_no=bank_batch_no,
+                salary_item_id=item.id,
+                id_card=item.id_card,
+                worker_name=item.worker_name,
+                bank_card_no=item.bank_card_no,
+                amount=item.payable_amount,
+                trade_status="PENDING"
+            )
+            db.add(detail)
 
         batch.status = BatchStatus.RETRYING
+        batch.bank_submit_at = retry_at
         db.flush()
 
         TraceService.add_trace(
@@ -459,20 +493,42 @@ class BankService:
             from_status=old_status,
             to_status=BatchStatus.RETRYING.value,
             operator=operator or "SYSTEM",
-            operator_role="OPERATOR",
+            operator_role="CUSTOMER_SERVICE",
             detail=(f"发起失败重发：共{retry_count}人，金额{retry_amount:.2f}元，"
+                    f"新银行批次号：{bank_batch_no}，"
                     f"涉及：{'、'.join([f'{i.worker_name}({i.id_card[-4:]})' for i in items_to_retry[:5]])}"
                     + ("等" if retry_count > 5 else "")),
-            remark=f"针对失败/退票人员重新提交银行代发"
+            remark=f"原失败原因已备份，重新提交银行代发"
         )
+
+        for item in items_to_retry:
+            TraceService.add_trace(
+                db=db,
+                trace_type=TraceType.ITEM_RETRY,
+                batch_id=batch.id,
+                batch_no=batch.batch_no,
+                project_code=batch.project_code,
+                salary_month=batch.salary_month,
+                id_card=item.id_card,
+                from_status=ItemStatus.FAILED.value,
+                to_status=ItemStatus.BANK_PROCESSING.value,
+                operator=operator or "SYSTEM",
+                operator_role="CUSTOMER_SERVICE",
+                detail=(f"【{item.worker_name}】发起重发，"
+                        f"原失败原因：{item.last_fail_reason or '无'}，"
+                        f"新银行批次号：{bank_batch_no}"),
+                remark=f"第{item.retry_count}次重发"
+            )
 
         db.commit()
 
         return {
             "success": True,
             "code": 200,
-            "message": f"已提交{retry_count}条失败明细进行重发",
+            "message": f"已提交{retry_count}条失败明细进行重发，已生成新的银行批次号",
             "batch_no": batch_no,
+            "bank_batch_no": bank_batch_no,
             "retry_count": retry_count,
-            "retry_amount": retry_amount
+            "retry_amount": retry_amount,
+            "retry_at": retry_at
         }

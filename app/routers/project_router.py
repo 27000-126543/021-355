@@ -7,7 +7,8 @@ from app.schemas.salary import (
     SalaryBatchSubmitRequest, VerifyResultResponse,
     VerifyOnlyResponse, BatchListResponse,
     BatchDetailResponse, WorkerStatusListResponse,
-    WorkerStatusQueryParams
+    WorkerStatusQueryParams, PendingReviewListResponse,
+    BatchReviewRequest, BatchReviewResponse
 )
 from app.services.salary_service import SalaryService
 
@@ -108,3 +109,48 @@ async def query_worker_status(
         return WorkerStatusListResponse(message="查询成功", total=total, data=data)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"查询失败: {str(e)}")
+
+
+@router.get("/batch/pending-review", response_model=PendingReviewListResponse, summary="待审核批次列表")
+async def get_pending_review_list(
+    project_code: Optional[str] = Query(None, description="项目编号"),
+    salary_month: Optional[str] = Query(None, description="发薪月份 YYYY-MM"),
+    page: int = Query(1, ge=1, description="页码"),
+    page_size: int = Query(20, ge=1, le=100, description="每页条数"),
+    db: Session = Depends(get_db)
+):
+    """
+    专户审核人员查看待审核的工资批次列表，按提交时间倒序
+    """
+    try:
+        data, total = SalaryService.get_pending_review_list(
+            db, project_code, salary_month, page, page_size
+        )
+        return PendingReviewListResponse(message="查询成功", total=total, data=data)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"查询失败: {str(e)}")
+
+
+@router.post("/batch/review", response_model=BatchReviewResponse, summary="专户审核(通过/驳回)")
+async def review_batch(
+    request: BatchReviewRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    专户审核：审核通过或驳回，驳回时需填写驳回原因。\n
+    - 审核通过后批次状态变为 APPROVED，可提交银行代发\n
+    - 审核驳回后批次状态变为 REJECTED，项目系统需调整后重新提交\n
+    审核人、审核时间、审核结果、审核备注都会记录在批次详情和轨迹时间线中
+    """
+    try:
+        result = SalaryService.review_batch(
+            db, request.batch_no, request.action.value,
+            request.review_by, request.review_remark
+        )
+        if not result.get("success"):
+            raise HTTPException(status_code=result.get("code", 400), detail=result.get("message"))
+        return BatchReviewResponse(**result)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"审核失败: {str(e)}")

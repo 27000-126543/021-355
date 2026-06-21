@@ -13,11 +13,14 @@ from app.schemas.trace import (
     TraceStatistics,
     SalaryTraceResponse,
     TraceTypeInfo,
-    TraceTypeEnum
+    TraceTypeEnum,
+    WorkerGroupedTimelineResponse
 )
 from app.schemas.salary import (
     WorkerStatusListResponse, WorkerStatusResponse,
-    WorkerStatusQueryParams
+    WorkerStatusQueryParams,
+    ProjectMonthlySummaryResponse,
+    ProjectMonthlySummaryItem
 )
 from app.services.trace_service import TraceService
 from app.services.salary_service import SalaryService
@@ -252,6 +255,57 @@ async def query_worker_status(
         )
         data, total = SalaryService.query_worker_status(db, params)
         return WorkerStatusListResponse(message="查询成功", total=total, data=data)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"查询失败: {str(e)}")
+
+
+@router.get("/worker/grouped-timeline", response_model=WorkerGroupedTimelineResponse,
+            summary="工人发薪时间线(按项目+月份分组-热线推荐)")
+async def get_worker_grouped_timeline(
+    id_card: str = Query(..., description="身份证号"),
+    project_code: Optional[str] = Query(None, description="项目编号(可选)"),
+    salary_month: Optional[str] = Query(None, description="发薪月份(可选)"),
+    db: Session = Depends(get_db)
+):
+    """
+    【客服热线推荐接口】按身份证号查询工人发薪记录，按项目和月份分组展示。\n
+    每个批次都带有从提交到最新状态的完整时间线，便于向工人清晰解释当前进度。\n
+    - 第一层：项目分组（跨多个项目的工人一目了然）
+    - 第二层：月份分组（每个项目下的发薪月份）
+    - 第三层：批次记录+完整时间线（点开看每一步处理过程）
+    """
+    try:
+        if not id_card:
+            raise HTTPException(status_code=400, detail="请提供身份证号")
+        return TraceService.get_worker_grouped_timeline(db, id_card, project_code, salary_month)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"查询失败: {str(e)}")
+
+
+@router.get("/project/monthly-summary", response_model=ProjectMonthlySummaryResponse,
+            summary="项目月度汇总(首页看板用)")
+async def get_project_monthly_summary(
+    project_code: Optional[str] = Query(None, description="项目编号(不传则查所有项目)"),
+    salary_month: Optional[str] = Query(None, description="发薪月份(不传则查所有月份)"),
+    db: Session = Depends(get_db)
+):
+    """
+    【项目系统首页看板接口】按项目和月份维度汇总统计。\n
+    包含：总批次、总人数、应发金额、已到账、待审核、审核中、银行处理中、失败、退票、重试等各状态的人数和金额。\n
+    方便项目系统首页直接展示当月发放进度概览。
+    """
+    try:
+        data = SalaryService.get_project_monthly_summary(db, project_code, salary_month)
+        items = [ProjectMonthlySummaryItem(**d) for d in data]
+        return ProjectMonthlySummaryResponse(
+            message=f"查询成功，共{len(items)}条汇总记录",
+            total=len(items),
+            data=items
+        )
     except HTTPException:
         raise
     except Exception as e:
